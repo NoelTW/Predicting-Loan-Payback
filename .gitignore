@@ -24,3 +24,48 @@ ENV/
 Thumbs.db
 
 results/
+
+
+
+# CatBoost
+catboost_info/
+*.cbm
+*.backup
+
+# LightGBM
+lightgbm_model.txt
+*.bin
+
+# XGBoost  
+*.model
+*.raw
+xgboost.model
+
+# TensorFlow/Keras
+*.h5
+*.pb
+checkpoints/
+logs/
+tensorboard/
+*.ckpt*
+
+# PyTorch
+*.pt
+*.pth
+runs/
+
+# scikit-learn
+*.pkl
+*.pickle
+*.joblib
+
+# MLflow
+mlruns/
+outputs/
+
+# Optuna
+*.db
+optuna_study/
+
+# Weights & Biases
+wandb/
