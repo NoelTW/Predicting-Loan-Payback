@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Tuple
+from typing import Dict, Tuple
 
 import numpy as np
 import pandas as pd
@@ -10,9 +10,109 @@ from pandas import DataFrame, Series
 
 from .config import TARGET_COL
 
+TargetEncodingState = Dict[str, Dict[str, Tuple[float, int]]]
+TARGET_ENCODING_COLUMNS = ["loan_purpose", "employment_status", "grade_letter"]
+TARGET_ENCODING_COMBOS = [("grade_letter", "loan_purpose")]
+
+
+def _normalize_category(series: pd.Series) -> pd.Series:
+    return series.fillna("__nan__").astype(str)
+
+
+def build_target_encoding_state(df: DataFrame) -> Tuple[TargetEncodingState, float]:
+    if TARGET_COL not in df.columns:
+        raise ValueError("Target column required to build target encoding statistics.")
+
+    tmp = df.copy()
+    tmp["grade_letter"] = tmp["grade_subgrade"].str[0]
+    target_mean = float(tmp[TARGET_COL].mean())
+
+    state: TargetEncodingState = {}
+    for col in TARGET_ENCODING_COLUMNS:
+        values = _normalize_category(tmp[col])
+        agg = (
+            tmp.assign(_cat=values)
+            .groupby("_cat")[TARGET_COL]
+            .agg(["sum", "count"])
+        )
+        state[col] = {
+            key: (float(row["sum"]), int(row["count"]))
+            for key, row in agg.iterrows()
+        }
+
+    for combo in TARGET_ENCODING_COMBOS:
+        combo_name = "__".join(combo)
+        combo_series = _normalize_category(tmp[combo[0]])
+        for name in combo[1:]:
+            combo_series = combo_series + "||" + _normalize_category(tmp[name])
+        agg = (
+            tmp.assign(_combo=combo_series)
+            .groupby("_combo")[TARGET_COL]
+            .agg(["sum", "count"])
+        )
+        state[combo_name] = {
+            key: (float(row["sum"]), int(row["count"]))
+            for key, row in agg.iterrows()
+        }
+
+    return state, target_mean
+
+
+def _apply_target_encoding(
+    df: DataFrame,
+    target_state: TargetEncodingState,
+    target_mean: float,
+    *,
+    fit_mode: bool,
+    target: Series | None,
+) -> None:
+    if not target_state:
+        return
+
+    if fit_mode and target is None:
+        raise ValueError("Target values required for fit_mode target encoding.")
+
+    def encode_from_stats(series: pd.Series, stats: Dict[str, Tuple[float, int]], label: str):
+        normalized = _normalize_category(series)
+        sums = normalized.map({k: v[0] for k, v in stats.items()})
+        counts = normalized.map({k: v[1] for k, v in stats.items()})
+        if fit_mode:
+            numer = sums - target
+            denom = counts - 1
+        else:
+            numer = sums
+            denom = counts
+        values = numer / denom
+        values = values.replace([np.inf, -np.inf], np.nan)
+        fallback = target_mean if not np.isnan(target_mean) else 0.0
+        df[f"te_{label}"] = values.fillna(fallback)
+
+    for col in TARGET_ENCODING_COLUMNS:
+        if col not in df.columns:
+            continue
+        stats = target_state.get(col)
+        if not stats:
+            continue
+        encode_from_stats(df[col], stats, col)
+
+    for combo in TARGET_ENCODING_COMBOS:
+        combo_name = "__".join(combo)
+        stats = target_state.get(combo_name)
+        if not stats:
+            continue
+        normalized = _normalize_category(df[combo[0]])
+        for name in combo[1:]:
+            normalized = normalized + "||" + _normalize_category(df[name])
+        encode_from_stats(normalized, stats, combo_name)
+
 
 def create_features(
-    df: DataFrame, *, is_train: bool = True
+    df: DataFrame,
+    *,
+    is_train: bool = True,
+    target_encoding_state: TargetEncodingState | None = None,
+    target_encoding_mean: float | None = None,
+    fit_target_encoding: bool = False,
 ) -> Tuple[DataFrame, Series | None]:
     """Return engineered features and the target (if requested)."""
     df = df.copy()
@@ -100,6 +200,15 @@ def create_features(
     df["grade_letter_ordinal"] = df["grade_letter"].map(grade_letter_order)
     df["high_grade_risk"] = (df["grade_letter_ordinal"] >= 4).astype(int)
 
+    if target_encoding_state:
+        _apply_target_encoding(
+            df,
+            target_encoding_state,
+            target_encoding_mean if target_encoding_mean is not None else 0.0,
+            fit_mode=fit_target_encoding,
+            target=df[TARGET_COL] if fit_target_encoding else None,
+        )
+
     df = pd.get_dummies(
         df, columns=["gender"], prefix="gender", drop_first=True, dtype=int
     )
@@ -137,4 +246,4 @@ def create_features(
     return df, y
 
 
-__all__ = ["create_features"]
+__all__ = ["create_features", "build_target_encoding_state"]

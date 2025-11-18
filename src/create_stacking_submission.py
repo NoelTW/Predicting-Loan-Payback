@@ -22,9 +22,9 @@ from .config import (
 )
 from .feature_engineering import create_features
 from .inference_utils import (
-    compute_fold_feature_columns,
     discover_model_paths,
     get_prediction_probabilities,
+    prepare_fold_feature_metadata,
     validate_selected_models,
 )
 
@@ -56,11 +56,11 @@ def build_oof_and_test_predictions(
     train_df: pd.DataFrame,
     test_df: pd.DataFrame,
     selected_models: Dict[str, Dict[int, Path]],
-    fold_columns: Dict[int, List[str]],
+    fold_metadata: Dict[int, Dict[str, object]],
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     oof_df = train_df[[ID_COL, TARGET_COL, "kfold"]].copy()
     test_meta = pd.DataFrame({ID_COL: test_df[ID_COL]})
-    X_test_base, _ = create_features(test_df, is_train=False)
+    test_feature_cache: Dict[int, pd.DataFrame] = {}
 
     for model_name in selected_models:
         oof_df[model_name] = np.nan
@@ -69,17 +69,32 @@ def build_oof_and_test_predictions(
         fold_test_preds: List[np.ndarray] = []
         for fold, model_path in sorted(selected_models[model_name].items()):
             model = joblib.load(model_path)
-            expected_cols = fold_columns[fold]
+            metadata = fold_metadata[fold]
+            expected_cols = metadata["columns"]
 
             valid_mask = train_df["kfold"] == fold
             valid_subset = train_df.loc[valid_mask]
-            X_valid, _ = create_features(valid_subset, is_train=True)
+            X_valid, _ = create_features(
+                valid_subset,
+                is_train=True,
+                target_encoding_state=metadata["target_state"],
+                target_encoding_mean=metadata["target_mean"],
+                fit_target_encoding=False,
+            )
             X_valid = X_valid.reindex(columns=expected_cols, fill_value=0)
 
             preds_valid = get_prediction_probabilities(model, X_valid)
             oof_df.loc[valid_mask, model_name] = preds_valid
 
-            X_test = X_test_base.reindex(columns=expected_cols, fill_value=0)
+            if fold not in test_feature_cache:
+                X_test_fold, _ = create_features(
+                    test_df,
+                    is_train=False,
+                    target_encoding_state=metadata["target_state"],
+                    target_encoding_mean=metadata["target_mean"],
+                )
+                test_feature_cache[fold] = X_test_fold
+            X_test = test_feature_cache[fold].reindex(columns=expected_cols, fill_value=0)
             preds_test = get_prediction_probabilities(model, X_test)
             fold_test_preds.append(preds_test)
 
@@ -110,10 +125,10 @@ def main() -> None:
     all_folds = sorted({fold for folds in selected_models.values() for fold in folds})
 
     train_df = pd.read_csv(TRAIN_FOLDS_FILE)
-    fold_columns = compute_fold_feature_columns(train_df, all_folds)
+    fold_metadata = prepare_fold_feature_metadata(train_df, all_folds)
     test_df = pd.read_csv(TEST_FILE)
 
-    oof_df, test_meta = build_oof_and_test_predictions(train_df, test_df, selected_models, fold_columns)
+    oof_df, test_meta = build_oof_and_test_predictions(train_df, test_df, selected_models, fold_metadata)
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     oof_df.to_csv(args.oof_output, index=False)

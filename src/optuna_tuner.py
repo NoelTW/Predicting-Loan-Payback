@@ -13,14 +13,18 @@ import numpy as np
 import optuna
 import pandas as pd
 from sklearn.metrics import roc_auc_score
+from catboost.core import CatBoostError
+from lightgbm.basic import LightGBMError
+from xgboost.core import XGBoostError
 
 from .config import MODEL_DIR, RESULTS_DIR, TRAIN_FOLDS_FILE
-from .feature_engineering import create_features
+from .feature_engineering import build_target_encoding_state, create_features
 from .inference_utils import get_prediction_probabilities
 from .model_dispatcher import MODELS, get_model
 
 TUNABLE_MODELS = {"lightgbm", "xgboost", "catboost"}
-CPU_OVERRIDES = {
+
+CPU_FALLBACK_PARAMS: Dict[str, Dict[str, object]] = {
     "lightgbm": {"device": "cpu"},
     "xgboost": {"device": "cpu", "tree_method": "hist"},
     "catboost": {"task_type": "CPU"},
@@ -86,8 +90,21 @@ def _prepare_fold_cache(df: pd.DataFrame) -> FoldCache:
         train_df = df[df["kfold"] != fold].reset_index(drop=True)
         valid_df = df[df["kfold"] == fold].reset_index(drop=True)
 
-        X_train, y_train = create_features(train_df, is_train=True)
-        X_valid, y_valid = create_features(valid_df, is_train=True)
+        target_state, target_mean = build_target_encoding_state(train_df)
+        X_train, y_train = create_features(
+            train_df,
+            is_train=True,
+            target_encoding_state=target_state,
+            target_encoding_mean=target_mean,
+            fit_target_encoding=True,
+        )
+        X_valid, y_valid = create_features(
+            valid_df,
+            is_train=True,
+            target_encoding_state=target_state,
+            target_encoding_mean=target_mean,
+            fit_target_encoding=False,
+        )
 
         cache.append((fold, X_train, y_train, X_valid, y_valid))
     return cache
@@ -98,12 +115,23 @@ def _build_model(model_name: str, params: Dict[str, object]):
         raise KeyError(f"Model '{model_name}' is not defined in model_dispatcher.")
 
     model = get_model(model_name)
-    overrides = CPU_OVERRIDES.get(model_name, {})
-    if overrides:
-        model.set_params(**overrides)
     if params:
         model.set_params(**params)
     return model
+
+
+def _fit_model_with_fallback(model_name, model, X_train, y_train):
+    try:
+        model.fit(X_train, y_train)
+    except (LightGBMError, XGBoostError, CatBoostError) as exc:
+        fallback = CPU_FALLBACK_PARAMS.get(model_name)
+        if not fallback:
+            raise
+        print(
+            f"{model_name} GPU training failed ({exc}). Retrying on CPU for this fold."
+        )
+        model.set_params(**fallback)
+        model.fit(X_train, y_train)
 
 
 def _suggest_parameters(model_name: str, trial: optuna.trial.Trial) -> Dict[str, object]:
@@ -156,7 +184,7 @@ def _evaluate_params(
     scores: List[float] = []
     for fold, X_train, y_train, X_valid, y_valid in fold_cache:
         model = _build_model(model_name, params)
-        model.fit(X_train, y_train)
+        _fit_model_with_fallback(model_name, model, X_train, y_train)
         preds = get_prediction_probabilities(model, X_valid)
         auc = roc_auc_score(y_valid, preds)
         scores.append(auc)
@@ -192,7 +220,7 @@ def _save_best_params(
     return output_path
 
 
-def _train_with_params(
+def train_with_params(
     df: pd.DataFrame,
     model_name: str,
     alias: str,
@@ -205,11 +233,24 @@ def _train_with_params(
         train_df = df[df["kfold"] != fold].reset_index(drop=True)
         valid_df = df[df["kfold"] == fold].reset_index(drop=True)
 
-        X_train, y_train = create_features(train_df, is_train=True)
-        X_valid, y_valid = create_features(valid_df, is_train=True)
+        target_state, target_mean = build_target_encoding_state(train_df)
+        X_train, y_train = create_features(
+            train_df,
+            is_train=True,
+            target_encoding_state=target_state,
+            target_encoding_mean=target_mean,
+            fit_target_encoding=True,
+        )
+        X_valid, y_valid = create_features(
+            valid_df,
+            is_train=True,
+            target_encoding_state=target_state,
+            target_encoding_mean=target_mean,
+            fit_target_encoding=False,
+        )
 
         model = _build_model(model_name, params)
-        model.fit(X_train, y_train)
+        _fit_model_with_fallback(model_name, model, X_train, y_train)
 
         preds = get_prediction_probabilities(model, X_valid)
         auc = roc_auc_score(y_valid, preds)
@@ -224,7 +265,7 @@ def _train_with_params(
     return fold_scores
 
 
-def _store_cv_results(
+def store_cv_results(
     model_name: str, alias: str, fold_scores: Dict[int, float]
 ) -> Path:
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -273,8 +314,8 @@ def main() -> None:
 
     if args.train_best:
         alias = args.model_alias or f"{args.model}_optuna"
-        fold_scores = _train_with_params(df, args.model, alias, best_params)
-        results_path = _store_cv_results(args.model, alias, fold_scores)
+        fold_scores = train_with_params(df, args.model, alias, best_params)
+        results_path = store_cv_results(args.model, alias, fold_scores)
         mean_auc = np.mean(list(fold_scores.values()))
         std_auc = np.std(list(fold_scores.values()))
         print(

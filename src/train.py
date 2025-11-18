@@ -14,7 +14,7 @@ from scipy.special import expit
 from sklearn.metrics import roc_auc_score
 
 from .config import MODEL_DIR, NUM_FOLDS, RESULTS_DIR, TARGET_COL, TRAIN_FOLDS_FILE
-from .feature_engineering import create_features
+from .feature_engineering import build_target_encoding_state, create_features
 from .model_dispatcher import MODELS, get_model
 
 
@@ -60,8 +60,21 @@ def _train_single_fold(df: pd.DataFrame, model_name: str, fold: int) -> float:
     train_df = df[df["kfold"] != fold].reset_index(drop=True)
     valid_df = df[df["kfold"] == fold].reset_index(drop=True)
 
-    X_train, y_train = create_features(train_df, is_train=True)
-    X_valid, y_valid = create_features(valid_df, is_train=True)
+    target_state, target_mean = build_target_encoding_state(train_df)
+    X_train, y_train = create_features(
+        train_df,
+        is_train=True,
+        target_encoding_state=target_state,
+        target_encoding_mean=target_mean,
+        fit_target_encoding=True,
+    )
+    X_valid, y_valid = create_features(
+        valid_df,
+        is_train=True,
+        target_encoding_state=target_state,
+        target_encoding_mean=target_mean,
+        fit_target_encoding=False,
+    )
 
     model = get_model(model_name)
     model.fit(X_train, y_train)

@@ -12,7 +12,7 @@ from pandas import DataFrame
 from scipy.special import expit
 
 from .config import MODEL_DIR
-from .feature_engineering import create_features
+from .feature_engineering import build_target_encoding_state, create_features
 
 MODEL_FILENAME_PATTERN = re.compile(r"(?P<name>.+)_fold(?P<fold>\d+)\.joblib$")
 
@@ -54,18 +54,31 @@ def validate_selected_models(
     return {name: discovered[name] for name in requested}
 
 
-def compute_fold_feature_columns(train_df: DataFrame, folds: Iterable[int]) -> Dict[int, list[str]]:
-    columns_per_fold: Dict[int, list[str]] = {}
+def prepare_fold_feature_metadata(
+    train_df: DataFrame, folds: Iterable[int]
+) -> Dict[int, Dict[str, object]]:
+    metadata: Dict[int, Dict[str, object]] = {}
     for fold in folds:
-        train_subset = train_df[train_df["kfold"] != fold]
-        X_train, _ = create_features(train_subset, is_train=True)
-        columns_per_fold[fold] = list(X_train.columns)
-    return columns_per_fold
+        train_subset = train_df[train_df["kfold"] != fold].reset_index(drop=True)
+        state, target_mean = build_target_encoding_state(train_subset)
+        X_train, _ = create_features(
+            train_subset,
+            is_train=True,
+            target_encoding_state=state,
+            target_encoding_mean=target_mean,
+            fit_target_encoding=True,
+        )
+        metadata[fold] = {
+            "columns": list(X_train.columns),
+            "target_state": state,
+            "target_mean": target_mean,
+        }
+    return metadata
 
 
 __all__ = [
     "MODEL_FILENAME_PATTERN",
-    "compute_fold_feature_columns",
+    "prepare_fold_feature_metadata",
     "discover_model_paths",
     "get_prediction_probabilities",
     "validate_selected_models",
