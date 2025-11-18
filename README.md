@@ -5,7 +5,7 @@ Welcome to the 2025 Kaggle Playground Series! We plan to continue in the spirit 
 
 Your Goal: Predict the probability that a borrower will pay back their loan.
 
-## Optuna tuning and submissions
+## Training, Optuna tuning, and stacked submissions
 
 You can explore more powerful ensembles by running Optuna directly from this repo:
 
@@ -26,4 +26,11 @@ You can explore more powerful ensembles by running Optuna directly from this rep
    uv run python -m src.create_stacking_submission --models lightgbm_optuna xgboost_optuna
    ```
 
-This workflow stores the best Optuna parameters inside `results/optuna_best_params.jsonl` so you can revisit or reproduce past studies.
+5. After you have multiple tuned entries in `results/optuna_best_params.jsonl`, retrain them and build a stacked submission in a single pass (this reuses the exact hyperparameters, trains fold artifacts, logs CV, produces OOF features, and writes the final CSV):
+   ```bash
+   uv run python -m src.train_tuned_and_stack \
+     --models lightgbm_optuna xgboost_optuna catboost_optuna \
+     --output submission_tuned_stack.csv
+   ```
+
+This workflow stores the best Optuna parameters inside `results/optuna_best_params.jsonl` so you can revisit or reproduce past studies. All training, tuning, and inference scripts now include out-of-fold target encodings (mean repayment rates for key categorical features and their combinations), which often provides a small but consistent boost on top of the engineered numeric interactions.
