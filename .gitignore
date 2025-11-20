@@ -69,3 +69,5 @@ optuna_study/
 
 # Weights & Biases
 wandb/
+
+.env    
